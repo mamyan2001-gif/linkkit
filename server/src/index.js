@@ -10,9 +10,11 @@ import {
   saveLinks,
   getLink,
   isValidLinkId,
+  isExpired,
   linkPublicView,
   deleteLink,
   withStoreLock,
+  purgeExpired,
 } from "./store.js";
 
 const PORT = Number(process.env.PORT) || 5090;
@@ -20,6 +22,15 @@ const HOST = process.env.HOST || "127.0.0.1";
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "";
 const MAX_URL_LENGTH = 2048;
+
+/** Preset TTL in ms. `never` / empty / 0 = no expiry. */
+const TTL_PRESETS = {
+  never: null,
+  "1h": 60 * 60 * 1000,
+  "24h": 24 * 60 * 60 * 1000,
+  "7d": 7 * 24 * 60 * 60 * 1000,
+  "30d": 30 * 24 * 60 * 60 * 1000,
+};
 
 const CSP = [
   "default-src 'self'",
@@ -161,6 +172,36 @@ function validateSlug(raw) {
   return { ok: true, slug };
 }
 
+/**
+ * Body field `ttl`: never | 1h | 24h | 7d | 30d
+ * Or `expiresIn` seconds (number), or `expiresAt` ISO string.
+ */
+function resolveExpiry(body) {
+  if (body?.expiresAt != null && body.expiresAt !== "") {
+    const t = Date.parse(String(body.expiresAt));
+    if (Number.isNaN(t)) return { ok: false, error: "Invalid expiresAt" };
+    if (t <= Date.now()) return { ok: false, error: "expiresAt must be in the future" };
+    return { ok: true, expiresAt: new Date(t).toISOString() };
+  }
+  if (body?.expiresIn != null && body.expiresIn !== "") {
+    const sec = Number(body.expiresIn);
+    if (!Number.isFinite(sec) || sec <= 0) {
+      return { ok: false, error: "expiresIn must be a positive number of seconds" };
+    }
+    return { ok: true, expiresAt: new Date(Date.now() + sec * 1000).toISOString() };
+  }
+  const ttlRaw = body?.ttl == null || body.ttl === "" ? "never" : String(body.ttl).trim();
+  if (!(ttlRaw in TTL_PRESETS)) {
+    return {
+      ok: false,
+      error: "ttl must be one of: never, 1h, 24h, 7d, 30d",
+    };
+  }
+  const ms = TTL_PRESETS[ttlRaw];
+  if (ms == null) return { ok: true, expiresAt: null };
+  return { ok: true, expiresAt: new Date(Date.now() + ms).toISOString() };
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
@@ -178,11 +219,14 @@ app.get("/api/links", async (req, res) => {
   try {
     const data = await loadLinks();
     const links = Object.entries(data.links)
+      .filter(([, link]) => !isExpired(link))
       .map(([id, link]) =>
         linkPublicView(id, link, { publicBaseUrl: PUBLIC_BASE_URL, port: PORT }),
       )
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ links });
+    // Opportunistic cleanup (don't block response)
+    purgeExpired().catch(() => {});
   } catch (err) {
     console.error("[Linkkit] list failed:", err.message);
     clientError(res, 500, "Failed to list links");
@@ -202,23 +246,41 @@ app.post("/api/links", async (req, res) => {
     const slugResult = validateSlug(req.body?.slug);
     if (!slugResult.ok) return clientError(res, 400, slugResult.error);
 
+    const expiryResult = resolveExpiry(req.body || {});
+    if (!expiryResult.ok) return clientError(res, 400, expiryResult.error);
+
     const result = await withStoreLock(async () => {
       const data = await loadLinks();
       let id = slugResult.slug;
       if (id) {
-        if (Object.prototype.hasOwnProperty.call(data.links, id)) {
+        const existing = data.links[id];
+        if (existing && !isExpired(existing)) {
           return { ok: false, status: 409, error: "Slug already taken" };
+        }
+        // Reclaim slug if previous link expired
+        if (existing && isExpired(existing)) {
+          delete data.links[id];
         }
       } else {
         do {
           id = nanoid(8);
-        } while (Object.prototype.hasOwnProperty.call(data.links, id));
+        } while (
+          Object.prototype.hasOwnProperty.call(data.links, id) &&
+          !isExpired(data.links[id])
+        );
+        if (
+          Object.prototype.hasOwnProperty.call(data.links, id) &&
+          isExpired(data.links[id])
+        ) {
+          delete data.links[id];
+        }
       }
 
       const link = {
         url: urlResult.url,
         createdAt: new Date().toISOString(),
         clicks: 0,
+        expiresAt: expiryResult.expiresAt,
       };
       data.links[id] = link;
       await saveLinks(data);
@@ -252,6 +314,10 @@ app.get("/api/links/:id", async (req, res) => {
     const data = await loadLinks();
     const link = getLink(data, id);
     if (!link) return clientError(res, 404, "Link not found");
+    if (isExpired(link)) {
+      await deleteLink(id);
+      return clientError(res, 410, "Link expired");
+    }
 
     res.json(
       linkPublicView(id, link, { publicBaseUrl: PUBLIC_BASE_URL, port: PORT }),
@@ -292,18 +358,26 @@ app.get("/r/:id", async (req, res) => {
     const target = await withStoreLock(async () => {
       const data = await loadLinks();
       const link = getLink(data, id);
-      if (!link) return null;
+      if (!link) return { kind: "missing" };
+      if (isExpired(link)) {
+        delete data.links[id];
+        await saveLinks(data);
+        return { kind: "expired" };
+      }
       link.clicks = (link.clicks || 0) + 1;
       data.links[id] = link;
       await saveLinks(data);
-      return link.url;
+      return { kind: "ok", url: link.url };
     });
 
-    if (!target) {
+    if (target.kind === "missing") {
       return res.status(404).type("text").send("Link not found");
     }
+    if (target.kind === "expired") {
+      return res.status(410).type("text").send("Link expired");
+    }
 
-    res.redirect(302, target);
+    res.redirect(302, target.url);
   } catch (err) {
     console.error("[Linkkit] redirect failed:", err.message);
     if (!res.headersSent) {
@@ -325,4 +399,14 @@ app.listen(PORT, HOST, () => {
   if (PUBLIC_BASE_URL) {
     console.log(`  short links: ${PUBLIC_BASE_URL}/r/{id}`);
   }
+  purgeExpired()
+    .then((n) => {
+      if (n) console.log(`[Linkkit] purged ${n} expired link(s)`);
+    })
+    .catch((err) => console.error("[Linkkit] purge failed:", err.message));
+  setInterval(() => {
+    purgeExpired().catch((err) =>
+      console.error("[Linkkit] purge failed:", err.message),
+    );
+  }, 15 * 60 * 1000).unref?.();
 });

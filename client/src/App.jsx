@@ -36,6 +36,20 @@ function truncateUrl(url, max = 48) {
   return `${url.slice(0, max - 1)}…`;
 }
 
+function formatExpiry(iso) {
+  if (!iso) return "Never expires";
+  try {
+    return `Expires ${new Date(iso).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    })}`;
+  } catch {
+    return `Expires ${iso}`;
+  }
+}
+
 function displayShort(link) {
   if (typeof window !== "undefined") {
     return `${window.location.origin}${link.shortPath}`;
@@ -46,6 +60,7 @@ function displayShort(link) {
 export default function App() {
   const [url, setUrl] = useState("");
   const [slug, setSlug] = useState("");
+  const [ttl, setTtl] = useState("never");
   const [links, setLinks] = useState([]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -79,12 +94,16 @@ export default function App() {
     setBusy(true);
     setError("");
     try {
-      const body = { url: url.trim() };
       const custom = slug.trim();
+      if (custom && (custom.length < 3 || !/^[A-Za-z0-9_-]{3,32}$/.test(custom))) {
+        throw new Error("Slug must be 3–32 characters: letters, numbers, _ or -");
+      }
+      const body = { url: url.trim(), ttl };
       if (custom) body.slug = custom;
       await api("/api/links", { method: "POST", body: JSON.stringify(body) });
       setUrl("");
       setSlug("");
+      setTtl("never");
       await refresh();
     } catch (err) {
       setError(err.message);
@@ -150,13 +169,27 @@ export default function App() {
               placeholder="my-link"
               value={slug}
               onChange={(e) => setSlug(e.target.value)}
-              minLength={3}
               maxLength={32}
-              pattern="[A-Za-z0-9_-]{3,32}"
-              title="3–32 characters: letters, numbers, _ or -"
+              pattern="[A-Za-z0-9_-]*"
+              title="3–32 characters: letters, numbers, _ or - (leave empty to auto-generate)"
               autoComplete="off"
               spellCheck={false}
             />
+          </div>
+          <div className="field field--ttl">
+            <label htmlFor="ttl">Expires</label>
+            <select
+              id="ttl"
+              name="ttl"
+              value={ttl}
+              onChange={(e) => setTtl(e.target.value)}
+            >
+              <option value="never">Never</option>
+              <option value="1h">1 hour</option>
+              <option value="24h">24 hours</option>
+              <option value="7d">7 days</option>
+              <option value="30d">30 days</option>
+            </select>
           </div>
           <button className="btn btn-primary" type="submit" disabled={busy || !url.trim()}>
             {busy ? "Shortening…" : "Shorten"}
@@ -201,6 +234,12 @@ export default function App() {
                     ·
                   </span>
                   <time dateTime={link.createdAt}>{formatTime(link.createdAt)}</time>
+                  <span className="dot" aria-hidden="true">
+                    ·
+                  </span>
+                  <span className={link.expiresAt ? "expiry" : "expiry expiry--never"}>
+                    {formatExpiry(link.expiresAt)}
+                  </span>
                 </p>
               </div>
               <div className="link-row__actions">
@@ -224,10 +263,6 @@ export default function App() {
           ))}
         </ul>
       </section>
-
-      <footer className="foot">
-        <span>Self-hosted · JSON storage · no database</span>
-      </footer>
     </div>
   );
 }

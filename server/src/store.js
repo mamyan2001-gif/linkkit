@@ -40,10 +40,37 @@ function normalizeLink(raw) {
   const url = typeof raw.url === "string" ? raw.url.trim() : "";
   if (!url) return null;
   const clicks = Math.max(0, Math.floor(Number(raw.clicks) || 0));
+  let expiresAt = null;
+  if (typeof raw.expiresAt === "string" && raw.expiresAt.trim()) {
+    const t = Date.parse(raw.expiresAt);
+    if (!Number.isNaN(t)) expiresAt = new Date(t).toISOString();
+  }
   return {
     url,
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
     clicks,
+    expiresAt,
+  };
+}
+
+export function isExpired(link) {
+  if (!link?.expiresAt) return false;
+  return Date.now() >= Date.parse(link.expiresAt);
+}
+
+export function linkPublicView(id, link, { publicBaseUrl, port } = {}) {
+  const shortPath = `/r/${id}`;
+  const base = (publicBaseUrl || "").replace(/\/$/, "") || `http://127.0.0.1:${port || 5090}`;
+  const expired = isExpired(link);
+  return {
+    id,
+    url: link.url,
+    createdAt: link.createdAt,
+    clicks: link.clicks || 0,
+    expiresAt: link.expiresAt || null,
+    expired,
+    shortPath,
+    shortUrl: `${base}${shortPath}`,
   };
 }
 
@@ -89,19 +116,6 @@ export function getLink(data, id) {
   return data.links[id];
 }
 
-export function linkPublicView(id, link, { publicBaseUrl, port } = {}) {
-  const shortPath = `/r/${id}`;
-  const base = (publicBaseUrl || "").replace(/\/$/, "") || `http://127.0.0.1:${port || 5090}`;
-  return {
-    id,
-    url: link.url,
-    createdAt: link.createdAt,
-    clicks: link.clicks || 0,
-    shortPath,
-    shortUrl: `${base}${shortPath}`,
-  };
-}
-
 export async function deleteLink(id) {
   if (!isValidLinkId(id)) return false;
   return withStoreLock(async () => {
@@ -110,5 +124,21 @@ export async function deleteLink(id) {
     delete data.links[id];
     await saveLinks(data);
     return true;
+  });
+}
+
+/** Remove expired links; returns number purged. */
+export async function purgeExpired() {
+  return withStoreLock(async () => {
+    const data = await loadLinks();
+    let n = 0;
+    for (const [id, link] of Object.entries(data.links)) {
+      if (isExpired(link)) {
+        delete data.links[id];
+        n += 1;
+      }
+    }
+    if (n) await saveLinks(data);
+    return n;
   });
 }

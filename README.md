@@ -12,7 +12,8 @@
 ## Features
 
 - Shorten any **http(s)** URL (rejects `javascript:`, `data:`, and other schemes)
-- Optional **custom slug** (`[a-zA-Z0-9_-]{3,32}`)
+- Optional **custom slug** (`[a-zA-Z0-9_-]{3,32}`) — conflict → `409 Slug already taken`
+- Optional **expiry timer**: Never · 1 hour · 24 hours · 7 days · 30 days (expired links return `410` and are purged)
 - **Click counts** incremented on every redirect
 - Shareable short path: `/r/{id}`
 - In-memory **rate limits** by IP on create and API reads
@@ -66,10 +67,10 @@ Open **http://127.0.0.1:5178**.
 |--------|------|-------------|
 | GET | `/api/health` | Health check → `{ ok, service: "linkkit" }` |
 | GET | `/api/links` | List links → `{ links: [{ id, url, createdAt, clicks, shortPath, shortUrl }] }` |
-| POST | `/api/links` | Create `{ url, slug? }` → link object |
+| POST | `/api/links` | Create `{ url, slug?, ttl? }` where `ttl` is `never` \| `1h` \| `24h` \| `7d` \| `30d` |
 | GET | `/api/links/:id` | Link detail + click count |
 | DELETE | `/api/links/:id` | Delete link |
-| GET | `/r/:id` | **302** redirect to target; increments `clicks` |
+| GET | `/r/:id` | **302** redirect; **410** if expired |
 
 ## Project layout
 
