@@ -1,0 +1,25 @@
+# OS
+.DS_Store
+.idea/
+.vscode/
+
+# Dependencies
+node_modules/
+
+# Build
+client/dist/
+dist/
+
+# Runtime data
+data/*
+!data/.gitkeep
+data/*.tmp
+data/links.json.*.tmp
+
+# Env
+.env
+.env.*
+*.log
+
+# Local tooling
+.tools/

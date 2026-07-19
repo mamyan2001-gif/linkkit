@@ -1,0 +1,17 @@
+services:
+  linkkit:
+    build: .
+    ports:
+      - "5090:5090"
+    environment:
+      PORT: "5090"
+      HOST: "0.0.0.0"
+      # PUBLIC_BASE_URL: "https://links.example.com"
+      # CORS_ORIGIN: "https://links.example.com"
+      # TRUST_PROXY: "true"
+    volumes:
+      - linkkit-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  linkkit-data:
